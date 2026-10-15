@@ -1,0 +1,109 @@
+name: Editor — Upstream-Auflage (48h)
+
+# Takt: alle 48 Stunden (gerade Tage, 04:00 UTC). Zusätzlich manuell auslösbar.
+on:
+  schedule:
+    - cron: '0 4 */2 * *'
+  workflow_dispatch:
+
+concurrency:
+  group: editor-auflage
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  pruefen:
+    runs-on: ubuntu-latest
+    outputs:
+      bewegt: ${{ steps.vergleich.outputs.bewegt }}
+      upstream: ${{ steps.vergleich.outputs.upstream }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: vergleich
+        run: |
+          UPSTREAM=$(curl -fsSL https://api.github.com/repos/storytold/lightcraft/commits/main | jq -r .sha)
+          PIN=$(cat upstream-pin.txt 2>/dev/null || echo "")
+          echo "upstream=$UPSTREAM" >> "$GITHUB_OUTPUT"
+          if [ "$UPSTREAM" = "$PIN" ]; then
+            echo "bewegt=false" >> "$GITHUB_OUTPUT"
+            echo "Keine Upstream-Bewegung (Pin=$PIN) — kein Rust-Build."
+          else
+            echo "bewegt=true" >> "$GITHUB_OUTPUT"
+            echo "Bewegung: Pin=$PIN -> Upstream=$UPSTREAM"
+          fi
+
+  bauen:
+    needs: pruefen
+    if: needs.pruefen.outputs.bewegt == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: lc-${{ needs.pruefen.outputs.upstream }}
+      - name: Rust-Werkzeuge
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+      - name: wasm-bindgen-cli (Version aus Cargo.toml)
+        run: |
+          WANT=$(grep -E '^wasm-bindgen = ' Cargo.toml | sed -E 's/.*"([0-9.]+)".*/\1/')
+          if command -v wasm-bindgen >/dev/null && wasm-bindgen --version | grep -q "$WANT"; then
+            echo "wasm-bindgen $WANT bereits vorhanden"
+          else
+            cargo install wasm-bindgen-cli --version "$WANT" --locked
+          fi
+      - name: Rebrand anwenden + prüfen
+        run: |
+          node tools/rebrand/rebrand.mjs --apply
+          node tools/rebrand/rebrand.mjs --check
+      - name: Bauen (cargo xtask web)
+        run: cargo xtask web
+      - name: Artefakt-Marker prüfen
+        run: |
+          test -f target/web-site/index.html
+          grep -q '<title>Endless Moments</title>' target/web-site/index.html
+          grep -q 'Loading Endless Moments' target/web-site/index.html
+          echo "Artefakt ok (Herkunfts-Hinweis in Kommentaren bleibt bewusst stehen)."
+      - name: Artefakt sichern
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-web-site-${{ needs.pruefen.outputs.upstream }}
+          path: target/web-site/
+          retention-days: 14
+      # TODO v1 (dokumentiert, kein Scheinschritt): vollstaendige cargo-Test-
+      # stufe mit Cache kommt als eigene Auflage; v1 prueft Build + Rebrand-
+      # Check + Artefakt-Marker.
+      - name: Versand (nur mit VERSAND_TOKEN — sonst ehrlicher Blocker)
+        env:
+          VERSAND_TOKEN: ${{ secrets.VERSAND_TOKEN }}
+        run: |
+          if [ -z "$VERSAND_TOKEN" ]; then
+            echo "VERSAND_TOKEN fehlt: Artefakt liegt als Build-Artefakt bereit."
+            echo "Owner-Aktion: PAT mit repo-Rechten als Secret VERSAND_TOKEN setzen;"
+            echo "danach verdrahtet die Koordination den PR gegen ENDLESS-MOMENTS-Beta."
+            exit 0
+          fi
+          echo "TODO v1: PR-Schritt gegen ENDLESS-MOMENTS-Beta (web-app/public/editor/**)."
+          echo "Der Schritt wird erst verdrahtet, wenn das Token gesetzt ist — kein blinder Push."
+      - name: Pin nachziehen
+        if: success()
+        run: |
+          echo "${{ needs.pruefen.outputs.upstream }}" > upstream-pin.txt
+          git config user.name "Endless Pipeline"
+          git config user.email "pipeline@localhost"
+          git add upstream-pin.txt
+          git commit -m "Auflage: Upstream-Pin auf ${{ needs.pruefen.outputs.upstream }}"
+          git push
