@@ -72,9 +72,14 @@ function umschreiben(rel) {
     if (HERKUNFT.test(zeile)) return zeile; // Namensnennung bleibt
     let z = zeile;
     for (const marke of marken) {
-      const teile = z.split(marke);
-      if (teile.length > 1) treffer += teile.length - 1;
-      z = teile.join('Endless Moments');
+      // NUR die freistehende Marke — zusammengeschriebene Bezeichner wie
+      // `LightCraftApp`/`LightcraftIcon` sind CODE und bleiben stehen.
+      const re = new RegExp(`(?<![\\w])${marke}(?![\\w])`, 'g');
+      const trefferHier = (z.match(re) || []).length;
+      if (trefferHier > 0) {
+        treffer += trefferHier;
+        z = z.replace(re, 'Endless Moments');
+      }
     }
     return z;
   });
@@ -103,7 +108,10 @@ for (const rel of dateienSammeln(WURZEL)) {
   if (quelle) {
     for (const zeile of quelle.split('\n')) {
       if (HERKUNFT.test(zeile)) continue;
-      for (const marke of marken) if (zeile.includes(marke)) restImScope++;
+      for (const marke of marken) {
+        const re = new RegExp(`(?<![\\w])${marke}(?![\\w])`, 'g');
+        restImScope += (zeile.match(re) || []).length;
+      }
     }
   }
 }
